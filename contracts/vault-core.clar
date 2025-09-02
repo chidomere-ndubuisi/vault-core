@@ -244,3 +244,113 @@
     (<= price-value u5000000000000) ;; Reasonable price ceiling
   )
 )
+
+;; PROTOCOL MANAGEMENT FUNCTIONS
+
+;; Initialize VaultCore protocol with enterprise configuration
+(define-public (initialize-vaultcore-protocol)
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (not (var-get protocol-active)) ERR_PROTOCOL_ALREADY_ACTIVE)
+
+    ;; Initialize default price feeds
+    (map-set asset-price-oracle { asset-symbol: "BTC" } {
+      current-price: u4500000000, ;; $45,000 default
+      last-update-block: stacks-block-height,
+      price-volatility-index: u15,
+      oracle-confidence: u95,
+    })
+
+    (map-set asset-price-oracle { asset-symbol: "STX" } {
+      current-price: u200000, ;; $2.00 default
+      last-update-block: stacks-block-height,
+      price-volatility-index: u25,
+      oracle-confidence: u90,
+    })
+
+    (var-set protocol-active true)
+    (ok "vaultcore-protocol-initialized")
+  )
+)
+
+;; Emergency protocol controls
+(define-public (activate-emergency-pause)
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (var-set emergency-pause-status true)
+    (ok "emergency-pause-activated")
+  )
+)
+
+(define-public (deactivate-emergency-pause)
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (var-set emergency-pause-status false)
+    (ok "emergency-pause-deactivated")
+  )
+)
+
+;; CORE LENDING OPERATIONS
+
+;; Premium collateral deposit with automatic optimization
+(define-public (deposit-bitcoin-collateral
+    (deposit-amount uint)
+    (enable-protection bool)
+  )
+  (begin
+    (asserts! (var-get protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (not (var-get emergency-pause-status))
+      ERR_MARKET_VOLATILITY_PROTECTION
+    )
+    (asserts! (> deposit-amount u0) ERR_INVALID_TRANSACTION_AMOUNT)
+
+    ;; Update global reserves
+    (var-set total-bitcoin-reserves
+      (+ (var-get total-bitcoin-reserves) deposit-amount)
+    )
+
+    ;; Update user portfolio
+    (match (map-get? user-portfolio-registry { account: tx-sender })
+      existing-portfolio (map-set user-portfolio-registry { account: tx-sender }
+        (merge existing-portfolio { total-collateral-locked: (+ (get total-collateral-locked existing-portfolio) deposit-amount) })
+      )
+      (map-set user-portfolio-registry { account: tx-sender } {
+        active-positions: (list),
+        total-collateral-locked: deposit-amount,
+        lifetime-interest-paid: u0,
+        account-health-score: u100,
+      })
+    )
+
+    (ok deposit-amount)
+  )
+)
+
+;; Intelligent loan origination with dynamic pricing
+(define-public (originate-vault-position
+    (collateral-amount uint)
+    (requested-loan-amount uint)
+    (preferred-term-months uint)
+  )
+  (let (
+      (btc-oracle-price (unwrap!
+        (get current-price (map-get? asset-price-oracle { asset-symbol: "BTC" }))
+        ERR_ORACLE_PRICE_FEED_ERROR
+      ))
+      (market-volatility (unwrap!
+        (get price-volatility-index
+          (map-get? asset-price-oracle { asset-symbol: "BTC" })
+        )
+        ERR_ORACLE_PRICE_FEED_ERROR
+      ))
+      (total-collateral-value (* collateral-amount btc-oracle-price))
+      (minimum-required-collateral (* requested-loan-amount (var-get minimum-collateral-threshold)))
+      (new-position-id (+ (var-get total-vault-positions) u1))
+      (dynamic-interest-rate (+ u4 (/ market-volatility u5))) ;; Base 4% + volatility adjustment
+    )
+    (begin
+      (asserts! (var-get protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+      (asserts! (>= total-collateral-value minimum-required-collateral)
+        ERR_INSUFFICIENT_COLLATERAL_COVERAGE
+      )
+      (asserts! (<= preferred-term-months u36) ERR_INVALID_TRANSACTION_AMOUNT) ;; Max 3 years
