@@ -354,3 +354,126 @@
         ERR_INSUFFICIENT_COLLATERAL_COVERAGE
       )
       (asserts! (<= preferred-term-months u36) ERR_INVALID_TRANSACTION_AMOUNT) ;; Max 3 years
+
+      ;; Create vault position
+      (map-set vault-positions { position-id: new-position-id } {
+        vault-owner: tx-sender,
+        collateral-deposited: collateral-amount,
+        principal-borrowed: requested-loan-amount,
+        annual-interest-rate: dynamic-interest-rate,
+        position-created-block: stacks-block-height,
+        last-interest-calculation: stacks-block-height,
+        current-status: "active",
+        risk-tier: (if (>= total-collateral-value (* requested-loan-amount u250))
+          "premium"
+          "standard"
+        ),
+        liquidation-protection: false,
+      })
+
+      ;; Update user portfolio
+      (match (map-get? user-portfolio-registry { account: tx-sender })
+        existing-portfolio (map-set user-portfolio-registry { account: tx-sender }
+          (merge existing-portfolio { active-positions: (unwrap!
+            (as-max-len?
+              (append (get active-positions existing-portfolio) new-position-id)
+              u25
+            )
+            ERR_INVALID_TRANSACTION_AMOUNT
+          ) }
+          ))
+        (map-set user-portfolio-registry { account: tx-sender } {
+          active-positions: (list new-position-id),
+          total-collateral-locked: collateral-amount,
+          lifetime-interest-paid: u0,
+          account-health-score: u100,
+        })
+      )
+
+      (var-set total-vault-positions new-position-id)
+      (ok new-position-id)
+    )
+  )
+)
+
+;; Flexible loan repayment with early settlement bonuses
+(define-public (settle-vault-position
+    (position-id uint)
+    (repayment-amount uint)
+  )
+  (begin
+    (asserts! (validate-position-identifier position-id)
+      ERR_INVALID_POSITION_IDENTIFIER
+    )
+
+    (let (
+        (vault-position (unwrap! (map-get? vault-positions { position-id: position-id })
+          ERR_VAULT_POSITION_NOT_FOUND
+        ))
+        (accrued-interest (calculate-compound-interest (get principal-borrowed vault-position)
+          (get annual-interest-rate vault-position)
+          (- stacks-block-height (get last-interest-calculation vault-position))
+        ))
+        (total-settlement-amount (+ (get principal-borrowed vault-position) accrued-interest))
+        (early-settlement-bonus (if (<= repayment-amount total-settlement-amount)
+          u0
+          (* (- repayment-amount total-settlement-amount) u5)
+        ))
+        ;; 5% bonus for overpayment
+      )
+      (begin
+        (asserts! (is-eq (get current-status vault-position) "active")
+          ERR_VAULT_POSITION_INACTIVE
+        )
+        (asserts! (is-eq (get vault-owner vault-position) tx-sender)
+          ERR_UNAUTHORIZED_ACCESS
+        )
+        (asserts! (>= repayment-amount total-settlement-amount)
+          ERR_INVALID_TRANSACTION_AMOUNT
+        )
+
+        ;; Update position status
+        (map-set vault-positions { position-id: position-id }
+          (merge vault-position {
+            current-status: "settled",
+            last-interest-calculation: stacks-block-height,
+          })
+        )
+
+        ;; Release collateral
+        (var-set total-bitcoin-reserves
+          (- (var-get total-bitcoin-reserves)
+            (get collateral-deposited vault-position)
+          ))
+
+        ;; Update protocol revenue
+        (var-set protocol-revenue-generated
+          (+ (var-get protocol-revenue-generated) accrued-interest)
+        )
+
+        (ok total-settlement-amount)
+      )
+    )
+  )
+)
+
+;; GOVERNANCE & ADMINISTRATION
+
+;; Dynamic collateral ratio adjustment based on market conditions
+(define-public (adjust-collateral-requirements
+    (new-minimum-ratio uint)
+    (new-liquidation-ratio uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (>= new-minimum-ratio u120) ERR_BELOW_MINIMUM_THRESHOLD) ;; Minimum 120%
+    (asserts! (>= new-liquidation-ratio u110) ERR_BELOW_MINIMUM_THRESHOLD) ;; Minimum 110%
+    (asserts! (> new-minimum-ratio new-liquidation-ratio)
+      ERR_INVALID_TRANSACTION_AMOUNT
+    )
+
+    (var-set minimum-collateral-threshold new-minimum-ratio)
+    (var-set critical-liquidation-ratio new-liquidation-ratio)
+    (ok "collateral-requirements-updated")
+  )
+)
