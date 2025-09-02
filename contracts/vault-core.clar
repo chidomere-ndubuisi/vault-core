@@ -121,3 +121,126 @@
     (/ collateral-percentage u100)
   )
 )
+
+;; Compound interest calculation with daily compounding
+(define-private (calculate-compound-interest
+    (principal-amount uint)
+    (annual-rate uint)
+    (time-blocks uint)
+  )
+  (let (
+      (daily-rate (/ annual-rate u365))
+      (compounding-periods (/ time-blocks BLOCKS_PER_DAY))
+      (compound-factor (+ u100 daily-rate))
+      (final-amount (* principal-amount (pow compound-factor compounding-periods)))
+    )
+    (- final-amount principal-amount)
+  )
+)
+
+;; Risk assessment algorithm for position health scoring
+(define-private (assess-position-risk
+    (collateral-ratio uint)
+    (position-age uint)
+    (market-volatility uint)
+  )
+  (let (
+      (ratio-score (if (>= collateral-ratio u200)
+        u30
+        u10
+      ))
+      (age-score (if (>= position-age u4320)
+        u20
+        u5
+      )) ;; 30 days
+      (volatility-penalty (if (>= market-volatility u20)
+        u5
+        u0
+      ))
+      (total-score (- (+ ratio-score age-score) volatility-penalty))
+    )
+    (if (> total-score u50)
+      u50
+      total-score
+    )
+  )
+)
+
+;; Smart liquidation checker with grace period
+(define-private (evaluate-liquidation-necessity (position-id uint))
+  (match (map-get? vault-positions { position-id: position-id })
+    position-data (let (
+        (asset-price (unwrap!
+          (get current-price
+            (map-get? asset-price-oracle { asset-symbol: "BTC" })
+          )
+          ERR_ORACLE_PRICE_FEED_ERROR
+        ))
+        (volatility (unwrap!
+          (get price-volatility-index
+            (map-get? asset-price-oracle { asset-symbol: "BTC" })
+          )
+          ERR_ORACLE_PRICE_FEED_ERROR
+        ))
+        (current-ratio (calculate-dynamic-collateral-ratio
+          (get collateral-deposited position-data)
+          (get principal-borrowed position-data) asset-price volatility
+        ))
+      )
+      (if (and
+          (<= current-ratio (var-get critical-liquidation-ratio))
+          (is-eq (get current-status position-data) "active")
+          (not (get liquidation-protection position-data))
+        )
+        (execute-position-liquidation position-id)
+        (ok "position-healthy")
+      )
+    )
+    ERR_VAULT_POSITION_NOT_FOUND
+  )
+)
+
+;; Advanced liquidation execution with penalty distribution
+(define-private (execute-position-liquidation (position-id uint))
+  (match (map-get? vault-positions { position-id: position-id })
+    position-data (let (
+        (vault-owner (get vault-owner position-data))
+        (collateral-amount (get collateral-deposited position-data))
+        (liquidation-penalty (* collateral-amount LIQUIDATION_PENALTY_RATE))
+        (remaining-collateral (- collateral-amount liquidation-penalty))
+      )
+      (begin
+        (map-set vault-positions { position-id: position-id }
+          (merge position-data {
+            current-status: "liquidated",
+            liquidation-protection: false,
+          })
+        )
+        (var-set protocol-revenue-generated
+          (+ (var-get protocol-revenue-generated) liquidation-penalty)
+        )
+        (ok "liquidation-executed")
+      )
+    )
+    ERR_VAULT_POSITION_NOT_FOUND
+  )
+)
+
+;; Input validation functions
+(define-private (validate-position-identifier (position-id uint))
+  (and
+    (> position-id u0)
+    (<= position-id (var-get total-vault-positions))
+  )
+)
+
+(define-private (validate-supported-asset (asset-symbol (string-ascii 4)))
+  (is-some (index-of SUPPORTED_ASSETS asset-symbol))
+)
+
+(define-private (validate-price-feed-data (price-value uint))
+  (and
+    (> price-value u0)
+    (<= price-value u5000000000000) ;; Reasonable price ceiling
+  )
+)
