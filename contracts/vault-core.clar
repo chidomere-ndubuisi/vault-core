@@ -477,3 +477,142 @@
     (ok "collateral-requirements-updated")
   )
 )
+
+;; Real-time oracle price feed management
+(define-public (update-asset-price-oracle
+    (asset-symbol (string-ascii 4))
+    (new-price uint)
+    (volatility-index uint)
+    (confidence-level uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (validate-supported-asset asset-symbol) ERR_UNSUPPORTED_ASSET_TYPE)
+    (asserts! (validate-price-feed-data new-price) ERR_ORACLE_PRICE_FEED_ERROR)
+    (asserts! (<= volatility-index u100) ERR_INVALID_TRANSACTION_AMOUNT)
+    (asserts! (<= confidence-level u100) ERR_INVALID_TRANSACTION_AMOUNT)
+
+    (ok (map-set asset-price-oracle { asset-symbol: asset-symbol } {
+      current-price: new-price,
+      last-update-block: stacks-block-height,
+      price-volatility-index: volatility-index,
+      oracle-confidence: confidence-level,
+    }))
+  )
+)
+
+;; Protocol fee structure optimization
+(define-public (optimize-fee-structure (new-protocol-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_OWNER) ERR_UNAUTHORIZED_ACCESS)
+    (asserts! (<= new-protocol-fee u10) ERR_INVALID_TRANSACTION_AMOUNT) ;; Maximum 10%
+
+    (var-set protocol-fee-percentage new-protocol-fee)
+    (ok "fee-structure-optimized")
+  )
+)
+
+;; ANALYTICS & REPORTING FUNCTIONS
+
+;; Comprehensive vault position analysis
+(define-read-only (get-vault-position-details (position-id uint))
+  (match (map-get? vault-positions { position-id: position-id })
+    position-data (let (
+        (current-btc-price (default-to u4500000000
+          (get current-price
+            (map-get? asset-price-oracle { asset-symbol: "BTC" })
+          )))
+        (accrued-interest (calculate-compound-interest (get principal-borrowed position-data)
+          (get annual-interest-rate position-data)
+          (- stacks-block-height (get last-interest-calculation position-data))
+        ))
+        (current-collateral-ratio (calculate-dynamic-collateral-ratio
+          (get collateral-deposited position-data)
+          (get principal-borrowed position-data) current-btc-price u15
+        ))
+      )
+      (ok {
+        position-data: position-data,
+        accrued-interest: accrued-interest,
+        current-collateral-ratio: current-collateral-ratio,
+        position-health: (assess-position-risk current-collateral-ratio
+          (- stacks-block-height (get position-created-block position-data))
+          u15
+        ),
+      })
+    )
+    ERR_VAULT_POSITION_NOT_FOUND
+  )
+)
+
+;; User portfolio dashboard
+(define-read-only (get-user-portfolio-summary (account principal))
+  (match (map-get? user-portfolio-registry { account: account })
+    portfolio-data (ok {
+      active-positions: (get active-positions portfolio-data),
+      total-collateral-locked: (get total-collateral-locked portfolio-data),
+      lifetime-interest-paid: (get lifetime-interest-paid portfolio-data),
+      account-health-score: (get account-health-score portfolio-data),
+      active-position-count: (len (get active-positions portfolio-data)),
+      has-portfolio: true,
+    })
+    (ok {
+      active-positions: (list),
+      total-collateral-locked: u0,
+      lifetime-interest-paid: u0,
+      account-health-score: u0,
+      active-position-count: u0,
+      has-portfolio: false,
+    })
+  )
+)
+
+;; Real-time protocol metrics and performance indicators
+(define-read-only (get-protocol-performance-metrics)
+  (let (
+      (total-value-locked (* (var-get total-bitcoin-reserves)
+        (default-to u4500000000
+          (get current-price
+            (map-get? asset-price-oracle { asset-symbol: "BTC" })
+          ))
+      ))
+      (utilization-rate (if (> (var-get total-bitcoin-reserves) u0)
+        (/ (* (var-get total-vault-positions) u100)
+          (var-get total-bitcoin-reserves)
+        )
+        u0
+      ))
+    )
+    (ok {
+      protocol-version: PROTOCOL_VERSION,
+      total-bitcoin-reserves: (var-get total-bitcoin-reserves),
+      total-vault-positions: (var-get total-vault-positions),
+      total-value-locked: total-value-locked,
+      protocol-revenue: (var-get protocol-revenue-generated),
+      utilization-rate: utilization-rate,
+      minimum-collateral-ratio: (var-get minimum-collateral-threshold),
+      liquidation-threshold: (var-get critical-liquidation-ratio),
+      emergency-status: (var-get emergency-pause-status),
+    })
+  )
+)
+
+;; Asset price oracle status
+(define-read-only (get-asset-price-data (asset-symbol (string-ascii 4)))
+  (map-get? asset-price-oracle { asset-symbol: asset-symbol })
+)
+
+;; Supported asset registry
+(define-read-only (get-supported-assets)
+  SUPPORTED_ASSETS
+)
+
+;; Protocol health check
+(define-read-only (get-protocol-health-status)
+  (ok {
+    protocol-active: (var-get protocol-active),
+    emergency-pause: (var-get emergency-pause-status),
+    total-positions: (var-get total-vault-positions),
+    system-version: PROTOCOL_VERSION,
+  })
+)
